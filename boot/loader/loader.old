@@ -1,0 +1,275 @@
+%define BOOT 0x07E0	;original boot address
+%define STACK 0x100	;stack address
+%define LOADER 0x2000	;loader address
+;memory map:	0x0 to 0x9FC00		FREE
+;		0x9FC00 to 0x100000	BIOS & SYSTEM
+;		0x100000 to -->end	FREE
+
+[BITS 16]
+[ORG 0x0]
+
+jmp start
+start:
+
+    mov ax,LOADER
+    mov ds,ax		;data
+
+    mov ax,STACK	;stack at 0x1000
+    mov ss,ax
+
+    mov ax,0xFFF	;init stack pointer
+    mov sp,ax		;stack limit is 0x2000
+
+    mov si,msg
+    call print
+
+a:
+jmp a
+
+;open A20 gate
+;a20:
+;    in al,0x64
+;    test al,2
+;    jnz a20
+
+;    mov al,0xD1
+;    out 0x64,al
+;    jmp .1
+;.1:
+;    in al,0x64
+;    test al,2
+;    jnz .1
+
+;    mov al,0xDF
+;    out 0x60,al
+;end A20
+
+;    mov si,startmsg
+;    call print
+
+;    mov ax,BOOT2	;dest
+;    mov es,ax		;es=dest
+;    mov cx,256		;comp=256 block of 2 bytes
+;    sub di,di		;di=di-di=0 destination index
+;    sub si,si		;si=si-si=0 source index
+;    cld			;increment mode
+;    rep			;repeat movsw 256
+;    movsw		;copy 2 bytes to dest
+
+;    jmp dword BOOT2:start2	;jump to new start
+
+;start2:
+
+;***************Load LOADER Image***************
+    xor		ax,ax		;ax=0
+    xor		bx,bx		;bx=0
+    int		0x13		;call floppy int
+
+    mov al,[0xD]		;load cluster size(nb of sector)
+    mov [cluster],al
+
+    mov bx,[0xE]		;boot strap size in sector
+    mov [fat],bx		;fat add
+
+				;find root add
+    xor bx,bx			;bx=0
+    mov bl,[0x10]		;load fat number
+    mov ax,[0x16]		;fat size in sector
+    mov [comp],ax
+    mul bx
+    add ax,[fat]		;add boot strap size
+    mov [root],ax		;root add
+
+    mov ax,[11h]		;rootentry number
+    mov [rootentry],ax
+    mov bx,0x20			;size of an entry
+    mul bx
+    mov bx,0x200		;divide per 512 = size in cluster
+    div bx
+    xor dx,dx
+    add ax,[root]
+    sub ax,2
+    mov [dataarea],ax
+
+    mov ax,[root]		;load root map
+    mov bx,0x200
+    jmp loop1b
+loop1:
+    add ax,0x1
+    add bx,0x20
+loop1b:
+    call readfd
+    cmp ax,[dataarea]
+    jne loop1			;jmp if not equal
+
+    mov cx,0			;find XPLDR.BIN
+    mov ax,0x200
+    mov es,ax
+    jmp find2
+find:
+    add cx,1
+find2:
+    cmp cx,[rootentry]
+    je err			;cx = rootentry ?
+    mov ax,cx
+    mov bx,0x20			;entry size
+    mul bx
+    mov bx,ax
+
+    mov ax,[es:bx]
+    cmp al,0
+    je err
+    cmp al,0xE5			;deleted file ?
+    je find
+
+    push cx			;compare string "XPLDR.BIN"
+    mov si,xpldr
+    mov di,bx
+    mov cx,11
+    repe
+    cmpsb
+    mov ax,cx
+    pop cx			;end compare
+    cmp ax,0
+    jne find			;if not equal, go find
+
+    mov ax,[es:bx+26]		;first cluster
+    push ax
+;    mov [rootentry], cx		;cause to problem size, reemploy rootentry
+				;rootentry = first cluster
+
+    mov ax,[fat]		;****a revoir****
+    mov bx,0x200
+    jmp loop2b
+err:				;*
+    mov si,errmsg		;*Pour economiser une instruction
+    call print			;*
+    jmp end			;*
+loop2:
+    add ax,0x1
+    add bx,0x20
+loop2b:
+    call readfd
+    cmp ax,[comp]
+    jne loop2			;jmp if not equal
+
+    mov ax,0x200
+    mov fs,ax			;****a revoir**** fin
+    mov ax,LOADER
+    mov es,ax
+    pop ax
+
+docp:
+    cmp ax,0xFF8
+    je donec
+    push ax
+    add ax,[dataarea]
+    mov bx,es
+    call readfd
+    add bx,0x20
+    pop ax
+
+    xor dx,dx
+    mov bx,12
+    mul bx
+    mov bx,8
+    div bx
+    cmp dx,0
+    mov bx,ax
+    mov ax,[fs:bx]
+    je pair
+    shr ax,4
+    jmp docp
+pair:
+    and ax,0x0FFF
+    jmp docp
+
+donec:
+
+    jmp dword LOADER:0		;jump to new start
+
+end:
+    jmp end
+
+print:
+    push ax
+    push bx
+    push cx
+    push dx
+
+    .debut:
+    lodsb		;ds:si -> al
+    cmp al,0		;end ?
+    jz .fin
+    mov ah,0x0E		;call BIOS service 0x0E
+    mov bx,0x07		;bx=color
+    int 0x10
+    jmp .debut
+
+    .fin
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+ret
+
+readfd:		;(sector number, dest) ****only for 1.44 Mb 1,5"****
+
+    push ax
+    push bx
+    push cx
+    push dx
+	mov es,bx		;dest address
+
+	mov bx,1
+	add ax,bx
+	mov bx,36
+	xor dx,dx
+	div bx
+	mov [trackc],al
+
+	mov ax,dx
+	xor dx,dx
+	mov bx,18
+	div bx
+	mov [facec],al
+	mov [sectorc],dl
+
+        mov bx,0		;??
+        mov ah,2		;2h command read
+        mov al,1		;nb sector to read normaly 18
+        mov ch,[trackc]			;track max=80
+        mov cl,[sectorc]		;sector max=18
+        mov dh,[facec]			;face nb max=2
+        mov dl,[bootdrv]	;disk nb
+        int 0x13
+
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+ret
+
+
+;********************************************************************
+errmsg db "Error: XPLDR.BIN not present",13,10,0
+msg db "XPLDR.BIN Running at 0x20000",13,10,0
+xpldr db "XPLDR   BIN "
+
+bootdrv: db 0
+
+;kernel position
+sectorc: db 0			;sector to read
+trackc: db 0
+facec: db 0
+;address: dw 0			;address to copy
+;sect: dw 0
+
+fat: dw 0			;address of fat table
+root: dw 0			;root table address
+rootentry: dw 0			;root entry number
+cluster: dw 0			;cluster size
+dataarea: dw 0			;data area address
+comp: dw 0
+
+times 510-($-$$) db 144
